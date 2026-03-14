@@ -8,10 +8,13 @@ import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
+import csv
 import gc
 import math
 import time
+import uuid
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 
 import torch
 import torch.nn as nn
@@ -24,6 +27,38 @@ repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/fl
 fa3 = get_kernel(repo).flash_attn_interface
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+
+LEADERBOARD_CSV = "leaderboard.csv"
+LEADERBOARD_FIELDS = [
+    "run_id",
+    "timestamp",
+    "val_bpb",
+    "train_loss_final",
+    "training_seconds",
+    "total_seconds",
+    "peak_vram_mb",
+    "tok_per_sec",
+    "mfu_percent",
+    "total_tokens_M",
+    "num_steps",
+    "num_params_M",
+    "depth",
+    "sequence_len",
+    "device_batch_size",
+    "total_batch_size",
+    "window_pattern",
+    "config_name",
+    "notes",
+]
+
+
+def append_leaderboard_row(row, csv_path=LEADERBOARD_CSV):
+    needs_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=LEADERBOARD_FIELDS)
+        if needs_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -539,6 +574,8 @@ t_start_training = time.time()
 smooth_train_loss = 0
 total_training_time = 0
 step = 0
+debiased_smooth_loss = float("nan")
+tok_per_sec = 0
 
 while True:
     torch.cuda.synchronize()
@@ -628,3 +665,30 @@ print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
+
+timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+run_id = f"{timestamp}_{uuid.uuid4()}"
+leaderboard_row = {
+    "run_id": run_id,
+    "timestamp": timestamp,
+    "val_bpb": f"{val_bpb:.6f}",
+    "train_loss_final": f"{debiased_smooth_loss:.6f}",
+    "training_seconds": f"{total_training_time:.1f}",
+    "total_seconds": f"{t_end - t_start:.1f}",
+    "peak_vram_mb": f"{peak_vram_mb:.1f}",
+    "tok_per_sec": tok_per_sec,
+    "mfu_percent": f"{steady_state_mfu:.2f}",
+    "total_tokens_M": f"{total_tokens / 1e6:.1f}",
+    "num_steps": step,
+    "num_params_M": f"{num_params / 1e6:.1f}",
+    "depth": DEPTH,
+    "sequence_len": MAX_SEQ_LEN,
+    "device_batch_size": DEVICE_BATCH_SIZE,
+    "total_batch_size": TOTAL_BATCH_SIZE,
+    "window_pattern": WINDOW_PATTERN,
+    "config_name": "",
+    "notes": "",
+}
+append_leaderboard_row(leaderboard_row)
+print(f"leaderboard_csv:  {LEADERBOARD_CSV}")
+print(f"run_id:           {run_id}")
